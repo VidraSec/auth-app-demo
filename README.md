@@ -34,8 +34,9 @@ One Python server answers on port 8000 and picks the site from the `Host` header
    - `__Host-`: the cookie only goes to the auth site, never to the apps.
 
    The refresh token expires after 7 days without use, and the session ends after 30 days at most, however active it is. `Max-Age` only tells the browser when to drop the cookie. A copied token would still work, so the server checks both limits itself.
-3. Open **App 1**. On page load its JS calls `POST auth…/refresh` with `credentials: "include"`. The browser adds the cookie, and the server answers with a **short-lived JWT** (5 min) and a **new refresh token** in the cookie. The old one stops working (rotation).
-4. App 1 keeps the JWT in `sessionStorage` and sends it as `Authorization: Bearer …` to APIs (*Call protected API*).
+   Login creates no access token. The apps get one when they need it.
+3. Open **App 1**. On page load its JS calls `POST auth…/refresh` with `credentials: "include"`. The browser adds the cookie, and the server answers with a **short-lived JWT** (5 min) and a **new refresh token** in the cookie. The old one stops working (rotation). The JWT is for App 1's API only: the server picks its `aud` from the request's `Origin`.
+4. App 1 keeps the JWT in `sessionStorage` and sends it as `Authorization: Bearer …` to its API (*Call protected API*). *Use token on App 2's API* plays an attacker who stole App 1's token: App 2's API rejects it.
 5. Open **App 2**: the cookie is already there, so you're logged in without logging in again (SSO).
 6. *Log out* (login page or the app's button) ends the session and clears the cookie; the app's button also deletes its access token. Other apps find out on their next page load (or back-button visit), when `/refresh` fails. A JWT they already have stays valid until it expires. That's why it's short-lived.
 
@@ -71,7 +72,7 @@ Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src http
 
 - **`SameSite` means *site*, not *origin*.** `app1.example.com`, `auth.example.com` and *every other* `*.example.com` are the same site. So `SameSite=Strict` does nothing against a forgotten subdomain someone took over, or a subdomain with user content. What keeps them away from `/refresh` is the server's `Origin` allow-list. CORS alone wouldn't: it only stops the attacker from *reading* the response, but a simple `POST` still reaches the server and runs.
 - **The token doesn't choose its algorithm.** The server ignores the JWT header's `alg` and always checks HS256. Libraries that trust `alg` have accepted `"alg": "none"` (no signature) and other tricks.
-- **`aud` and `iss`.** The JWT says who issued it (`iss`) and which API it is for (`aud`), and the API checks both. Without `aud`, every API that trusts the signing key would accept a token meant for another one.
+- **`aud` and `iss`.** The JWT says who issued it (`iss`) and which API it is for (`aud`), and the API checks both. Each app has its own API (`/api/app1/me`, `/api/app2/me`) with its own `aud`. Without that, every API that trusts the signing key would accept a token meant for another one, and a token stolen from one app would work on all of them. The `aud` comes from the `Origin` of the `/refresh` request, which page JS can't fake, so App 1 can't ask for a token for App 2's API.
 - **Escaping depends on where the value goes.** The server fills values into HTML with `html.escape`, and into `app.js` with `json.dumps`. `html.escape` inside a `<script>` would be the wrong kind of escaping.
 - **No caching.** Every response carries `Cache-Control: no-store`, so browsers and proxies don't keep a copy of tokens or login state.
 - **Only known hosts.** The server listens on `127.0.0.1` only and answers only the four known `Host` names. That also blocks DNS rebinding (a malicious site pointing its own name at your `127.0.0.1`).

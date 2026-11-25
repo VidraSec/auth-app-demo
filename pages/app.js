@@ -1,5 +1,8 @@
 const AUTH = {{AUTH}};  // filled in by the server, escaped with json.dumps
 const MAIN = {{MAIN}};
+const API = {{API}};  // this app's own API: accepts only tokens issued to this app
+const OTHER_API = {{OTHER_API}};  // the other app's API
+const OTHER_APP_NAME = {{OTHER_APP_NAME}};
 
 document.getElementById("host").textContent = location.hostname + " (" + document.title + ")";
 const statusEl = document.getElementById("status");
@@ -18,12 +21,26 @@ async function refresh() {
   return access_token;
 }
 
-document.getElementById("api").onclick = async () => {
+async function callApi(url) {
   logEl.textContent = "";
   const token = sessionStorage.getItem("access_token");
-  log(`> fetch("${AUTH}/api/me", { headers: { Authorization: "Bearer <access_token>" } })`);
-  const r = await fetch(AUTH + "/api/me", { headers: { Authorization: "Bearer " + token } });
+  log(`> fetch("${url}", { headers: { Authorization: "Bearer <access_token>" } })`);
+  const r = await fetch(url, { headers: { Authorization: "Bearer " + token } });
   log(`HTTP ${r.status}`, json(await r.json()));
+  return r;
+}
+
+document.getElementById("api").onclick = () => callApi(API);
+
+// Like an attacker who stole this app's token and tries it on the other app's API.
+// The token's aud names this app's API only, so the other API rejects it.
+document.getElementById("other-api").onclick = async () => {
+  const r = await callApi(OTHER_API);
+  const token = sessionStorage.getItem("access_token");
+  if (!token) return;
+  log("", r.ok
+    ? "  ✓ accepted. Tokens are interchangeable between apps!"
+    : `  ✗ rejected: this token's aud is ${decodeJwt(token).aud},\n    and ${OTHER_APP_NAME}'s API only accepts tokens issued for itself.`);
 };
 
 // Log out: the server revokes the session and clears the refresh cookie, and this app forgets

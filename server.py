@@ -32,7 +32,8 @@ ORIGINS = {
     "app2": f"http://app2.demo.localhost:{PORT}",
 }
 SITE_BY_HOST = {urlparse(o).netloc: site for site, o in ORIGINS.items()}
-APP_ORIGINS = [ORIGINS["app1"], ORIGINS["app2"]]
+APPS = ("app1", "app2")
+APP_BY_ORIGIN = {ORIGINS[app]: app for app in APPS}  # the only origins allowed to call /refresh etc.
 
 COOKIE = "__Host-refresh_token"
 REFRESH_TTL = 60 * 60 * 24 * 7  # 7 days: a refresh token unused for this long expires (idle timeout)
@@ -40,8 +41,18 @@ SESSION_MAX = 60 * 60 * 24 * 30  # 30 days: a session ends after this, however a
 ACCESS_TTL = 60 * 5  # 5 minutes
 
 # JWT claims: who issued the token, and which API it is meant for.
+# Each app has its own API, and each API its own audience. A token is issued for exactly one
+# of them, so App 1's token is rejected by App 2's API.
 ISSUER = ORIGINS["auth"]
-API_AUDIENCE = ORIGINS["auth"] + "/api"
+
+
+def api_path(app: str) -> str:
+    return f"/api/{app}/me"
+
+
+def api_audience(app: str) -> str:
+    return ORIGINS["auth"] + f"/api/{app}"
+
 
 # The "database", kept in memory. A restart logs everyone out.
 # A login starts a session. Each /refresh replaces the session's refresh token with a new one
@@ -159,6 +170,10 @@ CSP = "; ".join([
 ])
 
 
+def app_name(app: str) -> str:
+    return app.replace("app", "App ")
+
+
 class Handler(BaseHTTPRequestHandler):
     @property
     def site(self):
@@ -185,7 +200,7 @@ class Handler(BaseHTTPRequestHandler):
     def cors(self):
         """Only our own apps may call the auth endpoints, with cookies included."""
         origin = self.headers.get("Origin")
-        if origin not in APP_ORIGINS:
+        if origin not in APP_BY_ORIGIN:
             return None
         return {
             "Access-Control-Allow-Origin": origin,
@@ -201,12 +216,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         # example.com, app1, app2: static pages.
-        if self.site in ("main", "app1", "app2") and self.path == "/":
-            page = "landing.html" if self.site == "main" else "app.html"
-            return self.send(200, render(page, **ORIGINS, APP_NAME=self.site.replace("app", "App ")))
-        if self.site in ("app1", "app2") and self.path == "/app.js":
-            js = render("app.js", escape=json.dumps, AUTH=ORIGINS["auth"], MAIN=ORIGINS["main"])
-            return self.send(200, js, content_type="text/javascript; charset=utf-8")
+        if self.site == "main" and self.path == "/":
+            return self.send(200, render("landing.html", **ORIGINS))
+        if self.site in APPS:
+            other = next(a for a in APPS if a != self.site)
+            if self.path == "/":
+                return self.send(200, render("app.html", **ORIGINS, APP_NAME=app_name(self.site),
+                                             OTHER_APP_NAME=app_name(other)))
+            if self.path == "/app.js":
+                js = render("app.js", escape=json.dumps, AUTH=ORIGINS["auth"], MAIN=ORIGINS["main"],
+                            API=ORIGINS["auth"] + api_path(self.site),
+                            OTHER_API=ORIGINS["auth"] + api_path(other), OTHER_APP_NAME=app_name(other))
+                return self.send(200, js, content_type="text/javascript; charset=utf-8")
 
         if self.site != "auth":
             return self.send(404, "Not found")
@@ -218,13 +239,17 @@ class Handler(BaseHTTPRequestHandler):
                 status = f"logged in as {sessions[sid]['user']}" if sid else "not logged in"
             return self.send(200, render("login.html", **ORIGINS, STATUS=status))
 
-        # A "protected API". In real life this is your backend, checking the JWT.
-        if self.path == "/api/me":
-            token = self.headers.get("Authorization", "").removeprefix("Bearer ")
-            claims = verify_jwt(token, API_AUDIENCE)
-            if not claims:
-                return self.send(401, {"error": "invalid or expired access token"}, self.cors())
-            return self.send(200, {"message": f"Hello {claims['sub']}!", "claims": claims}, self.cors())
+        # One "protected API" per app. In real life each is its own backend, checking the JWT,
+        # and accepting only tokens whose aud is its own.
+        for app in APPS:
+            if self.path == api_path(app):
+                token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                claims = verify_jwt(token, api_audience(app))
+                if not claims:
+                    return self.send(401, {"error": f"invalid or expired access token for {app_name(app)}'s API"},
+                                     self.cors())
+                return self.send(200, {"message": f"Hello {claims['sub']}, from {app_name(app)}'s API!",
+                                       "claims": claims}, self.cors())
 
         self.send(404, "Not found")
 
@@ -273,11 +298,14 @@ class Handler(BaseHTTPRequestHandler):
                 if error:
                     return self.send(401, {"error": error}, cors)
                 user = sessions[sid]["user"]
+                # The token is for the API of the app asking. The Origin was checked by cors() above,
+                # and browsers don't let page JS fake it, so app1 can't get a token for app2's API.
+                app = APP_BY_ORIGIN[origin]
                 # Rotation: the cookie gets a new refresh token, the one just used is now invalid.
                 token, max_age = new_refresh_token(sid)
             now = int(time.time())
             # jti: random ID, so two tokens issued in the same second still differ.
-            jwt = make_jwt({"iss": ISSUER, "aud": API_AUDIENCE, "sub": user,
+            jwt = make_jwt({"iss": ISSUER, "aud": api_audience(app), "sub": user,
                             "iat": now, "exp": now + ACCESS_TTL, "jti": secrets.token_hex(4)})
             return self.send(200, {"access_token": jwt, "expires_in": ACCESS_TTL},
                              {**cors, "Set-Cookie": set_cookie(token, max_age)})
