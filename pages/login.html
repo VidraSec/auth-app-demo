@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>auth.demo.localhost</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 0 auto; padding: 0 1rem; line-height: 1.5; }
+    nav { padding: .8rem 0; border-bottom: 1px solid #ddd; margin-bottom: 1.5rem; }
+    nav a { margin-right: 1.5rem; }
+    form { display: inline; }
+    button { padding: .4rem 1.2rem; margin-right: .5rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <nav><a href="{{auth}}/">Login</a> <a href="{{app1}}/">App 1</a> <a href="{{app2}}/">App 2</a></nav>
+  <h1>auth.demo.localhost</h1>
+  <p>Status: <b>{{STATUS}}</b></p>
+  <p>Mock login: no username or password.</p>
+  <form method="post" action="/login"><button>Log in as demo-user</button></form>
+  <form method="post" action="/logout"><button>Log out</button></form>
+</body>
+</html>

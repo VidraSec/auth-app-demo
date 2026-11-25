@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{APP_NAME}}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 0 1rem; line-height: 1.5; }
+    nav { padding: .8rem 0; border-bottom: 1px solid #ddd; margin-bottom: 1.5rem; }
+    nav a { margin-right: 1.5rem; }
+    button { padding: .3rem 1rem; margin-right: .5rem; cursor: pointer; }
+    pre { background: #1e1e1e; color: #d4d4d4; padding: 1rem; border-radius: 4px; white-space: pre-wrap; word-break: break-all; font-size: 13px; min-height: 2rem; }
+  </style>
+</head>
+<body>
+  <nav><a href="{{auth}}/">Login</a> <a href="{{app1}}/">App 1</a> <a href="{{app2}}/">App 2</a></nav>
+  <h1 id="host">{{APP_NAME}}</h1>
+  <p>Status: <b id="status">checking…</b></p>
+  <p>
+    <button id="api">Call protected API</button>
+    <button id="xss">Run XSS test</button>
+  </p>
+  <pre id="log"></pre>
+
+<script>
+const AUTH = "{{auth}}";
+document.getElementById("host").textContent = location.hostname + " ({{APP_NAME}})";
+const logEl = document.getElementById("log");
+const log = (...lines) => (logEl.textContent += lines.join("\n") + "\n");
+const json = (x) => JSON.stringify(x, null, 2);
+const decodeJwt = (t) => JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+
+// Ask auth.demo.localhost for an access token. The browser adds the HttpOnly
+// refresh cookie by itself (credentials: "include"); this script never sees it.
+async function refresh() {
+  const r = await fetch(AUTH + "/refresh", { method: "POST", credentials: "include" });
+  if (!r.ok) { sessionStorage.removeItem("access_token"); return null; }
+  const { access_token } = await r.json();
+  sessionStorage.setItem("access_token", access_token);
+  return access_token;
+}
+
+document.getElementById("api").onclick = async () => {
+  logEl.textContent = "";
+  const token = sessionStorage.getItem("access_token");
+  log(`> fetch("${AUTH}/api/me", { headers: { Authorization: "Bearer <access_token>" } })`);
+  const r = await fetch(AUTH + "/api/me", { headers: { Authorization: "Bearer " + token } });
+  log(`HTTP ${r.status}`, json(await r.json()));
+};
+
+// Pretend we're an attacker's script injected into this page. What can we get?
+document.getElementById("xss").onclick = async () => {
+  logEl.textContent = "";
+  document.cookie = "normal_cookie=set-by-javascript; SameSite=Strict"; // for comparison
+
+  log("> document.cookie");
+  log(json(document.cookie));
+  log(document.cookie.includes("refresh_token")
+    ? "  ✓ refresh token found"
+    : "  ✗ no refresh_token in here (it's HttpOnly). Only the normal cookie set by JS is visible.", "");
+
+  log('> sessionStorage.getItem("access_token")');
+  const token = sessionStorage.getItem("access_token");
+  log(json(token));
+  if (token) log("  ✓ readable. Decoded payload:", "  " + JSON.stringify(decodeJwt(token)));
+  log("");
+
+  log(`> r = await fetch("${AUTH}/refresh", { method: "POST", credentials: "include" })`);
+  const r = await fetch(AUTH + "/refresh", { method: "POST", credentials: "include" });
+  log(`HTTP ${r.status} ${r.statusText}`, "");
+
+  log("> [...r.headers]   // every response header JS can see");
+  log([...r.headers].map(([k, v]) => `${k}: ${v}`).join("\n") || "(none)");
+  if (r.headers.has("set-cookie")) log("  ✓ set-cookie visible", "");
+  else log("  ✗ no set-cookie. /refresh doesn't send one, and even if it did (like /login does),",
+           "    browsers never show Set-Cookie to JS. Cross-origin, JS only sees a few basic headers.", "");
+
+  log("> await r.json()");
+  const body = await r.json();
+  log(json(body));
+  if (body.access_token) {
+    log("  ✓ a NEW access token. The browser attached the refresh cookie for us,",
+        "    so we can't steal the cookie, but we can use it while we run in this page.",
+        "  Decoded payload:",
+        "  " + JSON.stringify(decodeJwt(body.access_token)),
+        "  Different from the token in sessionStorage? " + (body.access_token !== token ? "yes" : "no"));
+  } else {
+    log("  ✗ no token: not logged in.");
+  }
+};
+
+// On page load: get a fresh access token with the refresh cookie (this is also what gives SSO across apps).
+(async () => {
+  const token = await refresh();
+  document.getElementById("status").textContent = token ? "logged in as " + decodeJwt(token).sub : "logged out";
+})();
+</script>
+</body>
+</html>
