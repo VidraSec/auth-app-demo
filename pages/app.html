@@ -71,7 +71,7 @@ document.getElementById("xss").onclick = async () => {
   log("> [...r.headers]   // every response header JS can see");
   log([...r.headers].map(([k, v]) => `${k}: ${v}`).join("\n") || "(none)");
   if (r.headers.has("set-cookie")) log("  ✓ set-cookie visible", "");
-  else log("  ✗ no set-cookie. /refresh doesn't send one, and even if it did (like /login does),",
+  else log("  ✗ no set-cookie. /refresh does send a new refresh cookie (rotation), but",
            "    browsers never show Set-Cookie to JS. Cross-origin, JS only sees a few basic headers.", "");
 
   log("> await r.json()");

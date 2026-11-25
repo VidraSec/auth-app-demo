@@ -37,8 +37,11 @@ COOKIE = "__Host-refresh_token"
 REFRESH_TTL = 60 * 60 * 24 * 7  # 7 days
 ACCESS_TTL = 60 * 5  # 5 minutes
 
-# The "database": valid refresh tokens are kept in memory. A restart logs everyone out.
-refresh_tokens = {}  # token -> user id
+# The "database", kept in memory. A restart logs everyone out.
+# A login starts a session. Each /refresh replaces the session's refresh token with a new one
+# (rotation). Old tokens stay listed so that reuse of one can be detected.
+sessions = {}  # session id -> {"user": ..., "token": current refresh token}
+tokens = {}  # every refresh token ever issued -> session id
 JWT_SECRET = secrets.token_bytes(32)
 
 PAGES = Path(__file__).parent / "pages"
@@ -84,6 +87,22 @@ def render(file: str, **vars) -> str:
     return text
 
 
+def new_refresh_token(sid: str) -> str:
+    token = secrets.token_urlsafe(32)  # random, means nothing by itself
+    sessions[sid]["token"] = token
+    tokens[token] = sid
+    return token
+
+
+def set_cookie(token: str, max_age: int = REFRESH_TTL) -> str:
+    # HttpOnly        -> JavaScript can't read it
+    # Secure          -> only sent over HTTPS (browsers make an exception for *.localhost)
+    # SameSite=Strict -> never sent on requests started by other sites
+    #                    (app1.demo.localhost and auth.demo.localhost are the same site)
+    # __Host- prefix  -> the browser requires Secure, Path=/ and no Domain (host-only)
+    return f"{COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age}"
+
+
 class Handler(BaseHTTPRequestHandler):
     @property
     def site(self):
@@ -118,6 +137,11 @@ class Handler(BaseHTTPRequestHandler):
         jar = SimpleCookie(self.headers.get("Cookie", ""))
         return jar[COOKIE].value if COOKIE in jar else None
 
+    def session(self):
+        """The session id for the request's refresh cookie, if that token is the current one."""
+        sid = tokens.get(self.refresh_cookie())
+        return sid if sid in sessions and sessions[sid]["token"] == self.refresh_cookie() else None
+
     def do_GET(self):
         # example.com, app1, app2: one static page each.
         if self.site in ("main", "app1", "app2") and self.path == "/":
@@ -129,8 +153,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # Login page. It's a mock: log in / log out buttons, no username or password.
         if self.path == "/":
-            user = refresh_tokens.get(self.refresh_cookie())
-            status = f"logged in as {user}" if user else "not logged in"
+            sid = self.session()
+            status = f"logged in as {sessions[sid]['user']}" if sid else "not logged in"
             return self.send(200, render("login.html", **ORIGINS, STATUS=status))
 
         # A "protected API". In real life this is your backend, checking the JWT.
@@ -155,37 +179,33 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, "Forbidden")
 
         if self.path == "/login":
-            token = secrets.token_urlsafe(32)  # random, means nothing by itself
-            refresh_tokens[token] = "demo-user"
-            return self.send(302, "", {
-                "Location": "/",
-                # HttpOnly        -> JavaScript can't read it
-                # Secure          -> only sent over HTTPS (browsers make an exception for *.localhost)
-                # SameSite=Strict -> never sent on requests started by other sites
-                #                    (app1.demo.localhost and auth.demo.localhost are the same site)
-                # __Host- prefix  -> the browser requires Secure, Path=/ and no Domain (host-only)
-                "Set-Cookie": f"{COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={REFRESH_TTL}",
-            })
+            sid = secrets.token_hex(8)
+            sessions[sid] = {"user": "demo-user"}
+            return self.send(302, "", {"Location": "/", "Set-Cookie": set_cookie(new_refresh_token(sid))})
 
         if self.path == "/logout":
-            refresh_tokens.pop(self.refresh_cookie(), None)  # revoke
-            return self.send(302, "", {
-                "Location": "/",
-                "Set-Cookie": f"{COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
-            })
+            sessions.pop(self.session(), None)  # revoke
+            return self.send(302, "", {"Location": "/", "Set-Cookie": set_cookie("", max_age=0)})
 
         # Refresh token (cookie) -> new short-lived access token (JWT). Called by the apps.
         if self.path == "/refresh":
             cors = self.cors()
             if cors is None:
                 return self.send(403, {"error": "origin not allowed"})
-            user = refresh_tokens.get(self.refresh_cookie())
-            if not user:
+            sid = tokens.get(self.refresh_cookie())
+            if sid not in sessions:
                 return self.send(401, {"error": "not logged in"}, cors)
+            if sessions[sid]["token"] != self.refresh_cookie():
+                # An old, already rotated token. Someone kept a copy: end the session for everyone.
+                del sessions[sid]
+                return self.send(401, {"error": "refresh token reused, session revoked"}, cors)
+            user = sessions[sid]["user"]
             now = int(time.time())
             # jti: random ID, so two tokens issued in the same second still differ.
             jwt = make_jwt({"sub": user, "iat": now, "exp": now + ACCESS_TTL, "jti": secrets.token_hex(4)})
-            return self.send(200, {"access_token": jwt, "expires_in": ACCESS_TTL}, cors)
+            # Rotation: the cookie gets a new refresh token, the one just used is now invalid.
+            return self.send(200, {"access_token": jwt, "expires_in": ACCESS_TTL},
+                             {**cors, "Set-Cookie": set_cookie(new_refresh_token(sid))})
 
         self.send(404, "Not found")
 
