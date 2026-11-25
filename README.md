@@ -8,6 +8,8 @@ python3 server.py
 
 Then open http://demo.localhost:8000.
 
+Requirements: Python 3, and a browser that resolves `*.localhost` to `127.0.0.1` on its own (Chrome, Edge, Firefox). Safari may need hosts file entries.
+
 ## The setup
 
 | Demo                                | In production       | What it does              |
@@ -79,3 +81,7 @@ So the apps are cross-*origin* (they need CORS and each has its own `sessionStor
 - **No refresh token rotation**: production setups usually issue a new refresh token on each `/refresh` and detect reuse.
 - **HS256 with a shared secret**: real APIs on other servers would use RS256/ES256, so they can check tokens with a public key.
 - **HTTP**: production needs HTTPS everywhere.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
