@@ -1,14 +1,16 @@
 # Auth demo: refresh cookie + access token across subdomains
 
-A very small demo of a common web app login setup. It uses only the Python standard library, with no database and no real users.
+A very small demo of a common web app login setup. It uses Python and [PyJWT](https://pyjwt.readthedocs.io/), with no database and no real users.
 
 ```
-python3 server.py
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python server.py
 ```
 
 Then open http://demo.localhost:8000.
 
-Requirements: Python 3, and a browser that resolves `*.localhost` to `127.0.0.1` on its own (Chrome, Edge, Firefox). Safari may need hosts file entries.
+Requirements: Python 3.10+, and a browser that resolves `*.localhost` to `127.0.0.1` on its own (Chrome, Edge, Firefox). Safari may need hosts file entries.
 
 ## The setup
 
@@ -73,7 +75,8 @@ Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src http
 ## Details worth knowing
 
 - **`SameSite` means *site*, not *origin*.** `app1.example.com`, `auth.example.com` and *every other* `*.example.com` are the same site. So `SameSite=Strict` does nothing against a forgotten subdomain someone took over, or a subdomain with user content. What keeps them away from `/refresh` is the server's `Origin` allow-list. CORS alone wouldn't: it only stops the attacker from *reading* the response, but a simple `POST` still reaches the server and runs.
-- **The token doesn't choose its algorithm.** The server ignores the JWT header's `alg` and always checks HS256. Libraries that trust `alg` have accepted `"alg": "none"` (no signature) and other tricks.
+- **ES256, not HS256.** The auth server signs JWTs with a private key. The APIs check them with the public key (`auth…/.well-known/jwks.json`), so they can't create tokens. With HS256's shared secret, any API that can check a token could also forge one.
+- **The token doesn't choose its algorithm.** The APIs accept only ES256, whatever the JWT header's `alg` says. Libraries that trust `alg` have accepted `"alg": "none"` (no signature), or HS256 tokens signed with the public key as the secret.
 - **`aud` and `iss`.** The JWT says who issued it (`iss`) and which API it is for (`aud`), and the API checks both. Each app has its own API (`/api/app1/me`, `/api/app2/me`) with its own `aud`. Without that, every API that trusts the signing key would accept a token meant for another one, and a token stolen from one app would work on all of them. The `aud` comes from the `Origin` of the `/refresh` request, which page JS can't fake, so App 1 can't ask for a token for App 2's API.
 - **Escaping depends on where the value goes.** The server fills values into HTML with `html.escape`, and into `app.js` with `json.dumps`. `html.escape` inside a `<script>` would be the wrong kind of escaping.
 - **No caching.** Every response carries `Cache-Control: no-store`, so browsers and proxies don't keep a copy of tokens or login state.
@@ -84,7 +87,7 @@ Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src http
 - **Mock login**: no credentials. The login/logout forms are only protected by an `Origin` check.
 - **Sessions in memory**: in production they go in a database (store refresh tokens hashed). Old refresh tokens are kept until the session ends, for reuse detection; a database would also delete expired sessions regularly.
 - **No rate limiting** on `/login` and `/refresh`.
-- **HS256 (shared secret)**: fine here, because the same server signs and checks the JWT. With separate API servers, each one would need the secret, and could then also *create* tokens. Use RS256/ES256 instead: the auth server signs with a private key, APIs check with the public key.
+- **Signing key in memory**, new on every start. In production it lives in a KMS or protected file and gets rotated; the `kid` in the JWT header says which key signed it.
 - **HTTP**: production needs HTTPS everywhere.
 
 ## License

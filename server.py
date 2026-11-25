@@ -1,4 +1,4 @@
-"""Minimal auth demo: Python standard library only, no database.
+"""Minimal auth demo: Python standard library plus PyJWT, no database.
 
 One server, four "sites", picked by the Host header:
   http://demo.localhost:8000        landing page              (example.com)
@@ -8,12 +8,10 @@ One server, four "sites", picked by the Host header:
 
 Browsers send *.localhost to 127.0.0.1 by themselves, so no hosts file is needed.
 
-Run:  python3 server.py
+Run:  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+      .venv/bin/python server.py
 """
 
-import base64
-import hashlib
-import hmac
 import html
 import json
 import secrets
@@ -23,6 +21,9 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+
+import jwt  # PyJWT
+from cryptography.hazmat.primitives.asymmetric import ec
 
 PORT = 8000
 ORIGINS = {
@@ -62,46 +63,41 @@ sessions = {}  # session id -> {"user", "created", "token" (current refresh toke
 #                                "previous" (the token it replaced), "rotated" (when)}
 tokens = {}  # every refresh token of a live session -> session id
 lock = threading.Lock()  # checking and rotating a token must be one step (in a database: one transaction)
-JWT_SECRET = secrets.token_bytes(32)
+
+# JWT signing key: ES256 (ECDSA on P-256 with SHA-256). Only the auth server has the private key.
+# The APIs need only the public key, published at /.well-known/jwks.json: they can check
+# tokens, but not create them. (With HS256, every API holding the shared secret could.)
+# A new key on every start, so a restart also invalidates all access tokens.
+JWT_ALG = "ES256"
+JWT_KEY = ec.generate_private_key(ec.SECP256R1())
+JWT_PUBLIC_KEY = JWT_KEY.public_key()
+JWT_KID = secrets.token_hex(4)  # key ID: lets APIs pick the right key once keys are rotated
+JWKS = {"keys": [{**jwt.algorithms.ECAlgorithm.to_jwk(JWT_PUBLIC_KEY, as_dict=True),
+                  "kid": JWT_KID, "alg": JWT_ALG, "use": "sig"}]}
 
 PAGES = Path(__file__).parent / "pages"
 
 
-# ---------- JWT (HS256) ----------
-
-def b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-
-def b64url_decode(s: str) -> bytes:
-    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
-
-
-def sign(msg: str) -> str:
-    return b64url(hmac.new(JWT_SECRET, msg.encode(), hashlib.sha256).digest())
-
+# ---------- JWT (ES256) ----------
 
 def make_jwt(payload: dict) -> str:
-    head = b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
-    body = b64url(json.dumps(payload).encode())
-    return f"{head}.{body}.{sign(head + '.' + body)}"
+    return jwt.encode(payload, JWT_KEY, algorithm=JWT_ALG, headers={"kid": JWT_KID})
 
 
 def verify_jwt(token: str, audience: str):
+    """What an API does: check the token with the auth server's *public* key only."""
     try:
-        head, body, sig = token.split(".")
-    except ValueError:
+        return jwt.decode(
+            token, JWT_PUBLIC_KEY,
+            # Never let the token choose its own algorithm (that's how "alg": "none" and
+            # algorithm-confusion attacks work): only ES256 is accepted, whatever the header says.
+            algorithms=[JWT_ALG],
+            audience=audience,  # a token issued for one API must not be accepted by another one
+            issuer=ISSUER,
+            options={"require": ["iss", "aud", "sub", "exp", "iat"]},  # missing claim -> rejected
+        )
+    except jwt.InvalidTokenError:  # bad signature, wrong alg/aud/iss, expired, malformed...
         return None
-    # The header's "alg" is ignored on purpose: we always check HS256. Never let the token choose
-    # its own algorithm, that's how "alg": "none" and algorithm-confusion attacks work.
-    # (bytes, because compare_digest rejects non-ASCII str)
-    if not hmac.compare_digest(sig.encode(), sign(head + "." + body).encode()):
-        return None
-    claims = json.loads(b64url_decode(body))
-    # aud: a token issued for one API must not be accepted by another one.
-    if claims["iss"] != ISSUER or claims["aud"] != audience or claims["exp"] <= time.time():
-        return None
-    return claims
 
 
 # ---------- sessions ----------
@@ -245,6 +241,10 @@ class Handler(BaseHTTPRequestHandler):
                 sid, _ = current_session(self.refresh_cookie())
                 status = f"logged in as {sessions[sid]['user']}" if sid else "not logged in"
             return self.send(200, render("login.html", **ORIGINS, STATUS=status))
+
+        # Public key(s) for checking access tokens. Public on purpose: they can't sign anything.
+        if self.path == "/.well-known/jwks.json":
+            return self.send(200, JWKS)
 
         # One "protected API" per app. In real life each is its own backend, checking the JWT,
         # and accepting only tokens whose aud is its own.
