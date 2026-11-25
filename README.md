@@ -44,6 +44,8 @@ One Python server answers on port 8000 and picks the site from the `Host` header
 
 Every `/refresh` replaces the refresh token. If an old token is ever used again, someone must have kept a copy (stolen from disk, a proxy log, a backup…). The server can't tell who is the real user, so it ends the whole session and everyone has to log in again.
 
+There is one exception, a **grace period**: for 10 seconds after a rotation, the token it replaced still works. Without it, two tabs that load at the same moment both send the same token, and the second one looks like reuse. The same happens when the response with the new cookie gets lost. Within the window the server doesn't rotate again but sends back the current token, so all tabs end up with the same cookie. The price: a stolen copy of the previous token is accepted for those 10 seconds. After that, reuse ends the session as before.
+
 Checking the token and replacing it must be one atomic step. Otherwise two requests with the same token can both pass the check, and reuse goes unnoticed. Here a lock does that; with a database, one transaction or `UPDATE … WHERE token = ?`.
 
 ## XSS test
@@ -82,7 +84,6 @@ Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src http
 - **Mock login**: no credentials. The login/logout forms are only protected by an `Origin` check.
 - **Sessions in memory**: in production they go in a database (store refresh tokens hashed). Old refresh tokens are kept until the session ends, for reuse detection; a database would also delete expired sessions regularly.
 - **No rate limiting** on `/login` and `/refresh`.
-- **No grace period on rotation**: if two tabs refresh at the exact same moment, the second one counts as reuse and ends the session. Real setups accept the previous token for a few seconds.
 - **HS256 (shared secret)**: fine here, because the same server signs and checks the JWT. With separate API servers, each one would need the secret, and could then also *create* tokens. Use RS256/ES256 instead: the auth server signs with a private key, APIs check with the public key.
 - **HTTP**: production needs HTTPS everywhere.
 

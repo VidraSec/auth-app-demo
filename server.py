@@ -39,6 +39,7 @@ COOKIE = "__Host-refresh_token"
 REFRESH_TTL = 60 * 60 * 24 * 7  # 7 days: a refresh token unused for this long expires (idle timeout)
 SESSION_MAX = 60 * 60 * 24 * 30  # 30 days: a session ends after this, however active (absolute timeout)
 ACCESS_TTL = 60 * 5  # 5 minutes
+ROTATION_GRACE = 10  # seconds the previous refresh token still works after a rotation (see current_session)
 
 # JWT claims: who issued the token, and which API it is meant for.
 # Each app has its own API, and each API its own audience. A token is issued for exactly one
@@ -57,7 +58,8 @@ def api_audience(app: str) -> str:
 # The "database", kept in memory. A restart logs everyone out.
 # A login starts a session. Each /refresh replaces the session's refresh token with a new one
 # (rotation). Old tokens stay listed so that reuse of one can be detected.
-sessions = {}  # session id -> {"user", "created", "token" (current refresh token), "token_expires"}
+sessions = {}  # session id -> {"user", "created", "token" (current refresh token), "token_expires",
+#                                "previous" (the token it replaced), "rotated" (when)}
 tokens = {}  # every refresh token of a live session -> session id
 lock = threading.Lock()  # checking and rotating a token must be one step (in a database: one transaction)
 JWT_SECRET = secrets.token_bytes(32)
@@ -117,6 +119,7 @@ def new_refresh_token(sid: str) -> tuple[str, int]:
     s = sessions[sid]
     token = secrets.token_urlsafe(32)  # random, means nothing by itself
     now = time.time()
+    s["previous"], s["rotated"] = s.get("token"), now
     s["token"] = token
     s["token_expires"] = min(now + REFRESH_TTL, s["created"] + SESSION_MAX)  # idle limit, never past the absolute one
     tokens[token] = sid
@@ -129,14 +132,18 @@ def current_session(token):
     if sid not in sessions:
         return None, "not logged in"
     s = sessions[sid]
-    if s["token"] != token:
-        # An old, already rotated token. Someone kept a copy: end the session for everyone.
-        end_session(sid)
-        return None, "refresh token reused, session revoked"
     if time.time() > s["token_expires"]:
         end_session(sid)
         return None, "session expired"
-    return sid, None
+    if token == s["token"]:
+        return sid, None
+    # Grace period: the token was replaced only seconds ago. That's normal, not theft: two tabs
+    # refreshed at the same moment with the same cookie, or the response with the new cookie got lost.
+    if token == s["previous"] and time.time() - s["rotated"] <= ROTATION_GRACE:
+        return sid, None
+    # An old, already rotated token. Someone kept a copy: end the session for everyone.
+    end_session(sid)
+    return None, "refresh token reused, session revoked"
 
 
 # ---------- request handling ----------
@@ -294,15 +301,22 @@ class Handler(BaseHTTPRequestHandler):
             if cors is None:
                 return self.send(403, {"error": "origin not allowed"})
             with lock:
-                sid, error = current_session(self.refresh_cookie())
+                sent = self.refresh_cookie()
+                sid, error = current_session(sent)
                 if error:
                     return self.send(401, {"error": error}, cors)
                 user = sessions[sid]["user"]
                 # The token is for the API of the app asking. The Origin was checked by cors() above,
                 # and browsers don't let page JS fake it, so app1 can't get a token for app2's API.
                 app = APP_BY_ORIGIN[origin]
-                # Rotation: the cookie gets a new refresh token, the one just used is now invalid.
-                token, max_age = new_refresh_token(sid)
+                s = sessions[sid]
+                if sent == s["token"]:
+                    # Rotation: the cookie gets a new refresh token, the one just used is now invalid.
+                    token, max_age = new_refresh_token(sid)
+                else:
+                    # Previous token, within the grace period: hand out the current one instead of
+                    # rotating again, so every tab ends up with the same cookie.
+                    token, max_age = s["token"], int(s["token_expires"] - time.time())
             now = int(time.time())
             # jti: random ID, so two tokens issued in the same second still differ.
             jwt = make_jwt({"iss": ISSUER, "aud": api_audience(app), "sub": user,
