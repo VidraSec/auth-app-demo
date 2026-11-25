@@ -12,12 +12,12 @@ Requirements: Python 3, and a browser that resolves `*.localhost` to `127.0.0.1`
 
 ## The setup
 
-| Demo                                | In production       | What it does              |
-|-------------------------------------|---------------------|---------------------------|
-| `http://demo.localhost:8000`        | `example.com`       | landing page              |
-| `http://auth.demo.localhost:8000`   | `auth.example.com`  | login, issues tokens      |
-| `http://app1.demo.localhost:8000`   | `app1.example.com`  | an app (static HTML + JS) |
-| `http://app2.demo.localhost:8000`   | `app2.example.com`  | another app, same code    |
+| URL                               | What it does              |
+|-----------------------------------|---------------------------|
+| `http://demo.localhost:8000`      | landing page              |
+| `http://auth.demo.localhost:8000` | login, issues tokens      |
+| `http://app1.demo.localhost:8000` | an app (static HTML + JS) |
+| `http://app2.demo.localhost:8000` | another app, same code    |
 
 One Python server answers on port 8000 and picks the site from the `Host` header.
 
@@ -31,7 +31,7 @@ One Python server answers on port 8000 and picks the site from the `Host` header
    - `HttpOnly`: JavaScript can't read it.
    - `Secure`: only sent over HTTPS (browsers make an exception for `localhost`).
    - `SameSite=Strict`: not sent on requests started by other sites (CSRF protection).
-   - `__Host-`: the cookie only goes to `auth.example.com`, never to the apps.
+   - `__Host-`: the cookie only goes to the auth site, never to the apps.
 3. Open **App 1**. On page load its JS calls `POST auth…/refresh` with `credentials: "include"`. The browser adds the cookie, and the server answers with a **short-lived JWT** (5 min) and a **new refresh token** in the cookie. The old one stops working (rotation).
 4. App 1 keeps the JWT in `sessionStorage` and sends it as `Authorization: Bearer …` to APIs (*Call protected API*).
 5. Open **App 2**: the cookie is already there, so you're logged in without logging in again (SSO).
